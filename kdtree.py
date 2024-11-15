@@ -7,10 +7,11 @@ A data structure to organize points in a K-dimensional space.
 
 from collections import deque
 from collections.abc import Callable
-from typing import Self, Optional
+from typing import Self, Optional, Literal
+import numpy as np
 
+import graphviz
 import math
-
 
 def euclid2(a: list | int, b: list | int) -> int:
     """Compute squared euclidean distance.
@@ -18,7 +19,7 @@ def euclid2(a: list | int, b: list | int) -> int:
     The squared euclidean distance is defined as:
 
     .. math::
-        d(a, b) = \sum_{i=1}^{k} (a_{i} - b_{i})^2
+        d(a, b) = \\sum_{i=1}^{k} (a_{i} - b_{i})^2
 
     Args:
         a: Point in k-dimensional space.
@@ -26,17 +27,10 @@ def euclid2(a: list | int, b: list | int) -> int:
 
     Returns:
         int: The squared euclidean distance between `a` and `b`
-    """
-    if not isinstance(a, list):
-        a = [a]
-    if not isinstance(b, list):
-        b = [b]
-
-    assert len(a) == len(b)
-    d = 0
-    for i, j in zip(a, b):
-        d += (i - j) ** 2
-    return d
+    # """
+    a = np.asarray(a)
+    b = np.asarray(b)
+    return np.linalg.norm(a - b)
 
 
 class KDNode:
@@ -51,7 +45,7 @@ class KDNode:
     def __init__(
         self, point=[], left: Optional[Self] = None, right: Optional[Self] = None
     ):
-        self.point = point
+        self.point = np.asarray(point)
         self.left = left
         self.right = right
 
@@ -71,7 +65,9 @@ class KDNode:
     def __repr__(self):
         right = None if self.right is None else hex(id(self.right))
         left = None if self.left is None else hex(id(self.left))
-        return f"{KDNode.__name__}(values={self.point}, left={left}, right={right})"
+        return (
+            f"{KDNode.__name__}(values={list(self.point)}, left={left}, right={right})"
+        )
 
 
 class KDTree:
@@ -88,6 +84,20 @@ class KDTree:
         self._ndim = ndim
         self._root = None
 
+    @staticmethod
+    def from_points(points: list, ndim: int, method: str = Literal["sort", "naive", "subset"], subsize=10):
+        points = np.asarray(points)
+        tree = KDTree(ndim)
+
+        if method == "sort":
+            tree._root = KDTree._build_sorted(ndim, 0, points)
+        elif method == "subset":
+            tree._root = KDTree._build_sorted_subset(ndim, 0, points, subsize)
+        elif method == "naive":
+            for point in points:
+                tree.insert(point)
+        return tree
+        
     @property
     def ndim(self):
         """Number of dimensions of points stored in the tree."""
@@ -124,6 +134,8 @@ class KDTree:
         Raises:
             ValueError: If `point` is already in the tree.
         """
+        if not isinstance(point, np.ndarray):
+            point = np.asarray(point)
         self._root = self.__insert(point, self._root, 0)
 
     def remove(self, point: list):
@@ -135,6 +147,8 @@ class KDTree:
         Raises:
             ValueError: If `point` is not found in the tree.
         """
+        if not isinstance(point, np.ndarray):
+            point = np.asarray(point)
         self._root = self.__remove(point, self._root, 0)
 
     def nearest_neighbour(self, point: list) -> tuple[float, KDNode]:
@@ -184,10 +198,46 @@ class KDTree:
         nn(self._root, 0)
         return math.sqrt(best_dist), best_node
 
-    def __insert(self, point: list, node: KDNode, dim: int):
+    @staticmethod
+    def _build_sorted(ndim: int, dim: int, points: np.ndarray):
+        if len(points) == 0:
+            return None
+    
+        sorted_points = points[points[:, dim].argsort()]
+        median = len(sorted_points) // 2
+
+        next_dim = (dim + 1) % ndim
+        node = KDNode(sorted_points[median])
+        node.left = KDTree._build_sorted(ndim, next_dim, sorted_points[ : median])
+        node.right = KDTree._build_sorted(ndim, next_dim, sorted_points[median + 1 : ])
+
+        return node
+
+    @staticmethod
+    def _build_sorted_subset(ndim: int, dim: int, points: np.ndarray, subset_size=10):
+        if len(points) == 0:
+            return None
+    
+        # subset = np.random.permutation(points)[ : subset_size]
+        # subset = subset[subset[:, dim].argsort()]
+        subset = points[np.random.choice(len(points), size=subset_size, replace=False)]
+        subset = subset[subset[:, dim].argsort()]
+
+        median = len(subset) // 2
+        pivot = points.tolist().index(subset[median].tolist())
+
+        next_dim = (dim + 1) % ndim
+        node = KDNode(points[pivot])
+        node.left = KDTree._build_sorted(ndim, next_dim, points[ : pivot])
+        node.right = KDTree._build_sorted(ndim, next_dim, subset[pivot + 1 : ])
+
+        return node
+    
+
+    def __insert(self, point: np.ndarray, node: KDNode, dim: int):
         if node is None:
             node = KDNode(point)
-        elif node.point == point:
+        elif np.array_equal(node.point, point):
             raise ValueError(f"Point '{point}' already exists")
         elif point[dim] <= node.point[dim]:
             node.left = self.__insert(point, node.left, (dim + 1) % self.ndim)
@@ -254,3 +304,29 @@ class KDTree:
                 if p is not None and p[dim] < min_point[dim]:
                     min_point = p
             return min_point
+
+
+def plot_tree(tree: KDTree, filename: str):
+    if tree is None or tree._root is None:
+        return
+
+    dot = graphviz.Digraph("kd-tree")
+    dot.node(f"{id(tree._root)}", f"{tree._root.point}")
+
+    def _plot(node: KDNode):
+        if node is None:
+            return
+    
+        if node.left:
+            dot.node(f"{id(node.left)}", f"{node.left.point}")
+            dot.edge(f"{id(node)}", f"{id(node.left)}")
+
+        if node.right:
+            dot.node(f"{id(node.right)}", f"{node.right.point}")
+            dot.edge(f"{id(node)}", f"{id(node.right)}")
+
+        _plot(node.left)
+        _plot(node.right)
+
+    _plot(tree._root)
+    dot.render(filename, format="png")
